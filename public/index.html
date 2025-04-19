@@ -126,7 +126,11 @@
     <script defer>
         console.log("SCRIPT: Loading...");
 
-        const socket = io();
+        // Explicitly set Socket.io URL (update for Render URL after deployment)
+        const socket = io(window.location.origin, {
+            transports: ['websocket', 'polling'],
+            reconnectionAttempts: 5
+        });
         const ROOM_ID = "game-room";
 
         const canvas = document.getElementById("gameCanvas");
@@ -141,7 +145,15 @@
         let ctx = null;
         let gameRunning = false;
         let animationFrameId = null;
-        let keys = {};
+        let lastRender = 0;
+        let localPlayerId = null;
+        let gameState = {
+            players: {},
+            enemies: [],
+            powerUps: [],
+            score: 0,
+            level: 1
+        };
 
         function checkBallRectCollision(ball, rect) {
             if (!rect || !ball) return false;
@@ -163,59 +175,86 @@
 
         function renderGame(state) {
             if (!ctx) return;
-            ctx.clearRect(0, 0, canvas.width, canvas.height);
+            ctx.clearRect(0, 0, 800, 400);
 
             ctx.fillStyle = "white";
             ctx.font = "18px Arial";
             ctx.textAlign = "center";
-            ctx.fillText(`Skor: ${state.score} | Seviye: ${state.level}`, canvas.width / 2, 30);
+            ctx.fillText(`Skor: ${state.score} | Seviye: ${state.level}`, 400, 30);
 
             for (let id in state.players) {
                 const player = state.players[id];
                 if (!player.isAlive) continue;
                 ctx.fillStyle = player.color;
-                ctx.fillRect(player.x, player.y, player.width, player.height);
+                ctx.fillRect(player.x, player.y, player.width || 32, player.height || 32);
                 if (player.harpoon && player.harpoon.active) {
                     ctx.fillStyle = player.color;
                     ctx.fillRect(
-                        player.harpoon.x - player.harpoon.width / 2,
+                        player.harpoon.x - (player.harpoon.width || 3) / 2,
                         player.harpoon.y,
-                        player.harpoon.width,
+                        player.harpoon.width || 3,
                         player.harpoon.startY - player.harpoon.y
                     );
                 }
                 if (player.activePowerUp) {
                     ctx.beginPath();
-                    ctx.arc(player.x + player.width / 2, player.y - 10, 5, 0, Math.PI * 2);
+                    ctx.arc(player.x + (player.width || 32) / 2, player.y - 10, 5, 0, Math.PI * 2);
                     ctx.fillStyle = player.activePowerUp === 'bulletSpeed' ? 'yellow' : 'purple';
                     ctx.fill();
                     ctx.closePath();
                 }
-                drawLives(player, player.color === "red" ? 20 : canvas.width - 20 - (player.lives * (15 + 5)) + 5, player.color);
+                drawLives(player, player.color === "red" ? 20 : 800 - 20 - (player.lives * (15 + 5)) + 5, player.color);
             }
 
+            ctx.fillStyle = "white";
             for (let enemy of state.enemies) {
                 ctx.beginPath();
                 ctx.arc(enemy.x, enemy.y, enemy.radius, 0, Math.PI * 2);
-                ctx.fillStyle = "white";
                 ctx.fill();
                 ctx.closePath();
             }
 
             for (let powerUp of state.powerUps) {
                 ctx.fillStyle = powerUp.type === 'bulletSpeed' ? 'yellow' : 'purple';
-                ctx.fillRect(powerUp.x - powerUp.width / 2, powerUp.y - powerUp.height / 2, powerUp.width, powerUp.height);
+                ctx.fillRect(powerUp.x - (powerUp.width || 10) / 2, powerUp.y - (powerUp.height || 10) / 2, powerUp.width || 10, powerUp.height || 10);
+            }
+        }
+
+        function resizeCanvas() {
+            const scale = Math.min(window.innerWidth / 800, window.innerHeight / 400);
+            canvas.width = 800 * scale;
+            canvas.height = 400 * scale;
+            canvas.style.width = `${canvas.width}px`;
+            canvas.style.height = `${canvas.height}px`;
+            if (ctx) {
+                ctx.scale(scale, scale);
             }
         }
 
         socket.on("connect", () => {
             console.log("Bağlandı:", socket.id);
+            localPlayerId = socket.id;
             socket.emit("join-game", ROOM_ID);
         });
 
-        socket.on("game-state", (state) => {
+        socket.on("connect_error", (err) => {
+            console.error("Socket.io connection error:", err.message);
+            alert("Sunucuya bağlanılamadı. Lütfen tekrar deneyin.");
+        });
+
+        socket.on("game-state", (delta) => {
             if (gameRunning) {
-                renderGame(state);
+                console.log("State received:", new Date().getTime());
+                const localVx = gameState.players[localPlayerId]?.vx || 0;
+                Object.assign(gameState.players, delta.players);
+                gameState.enemies = delta.enemies;
+                gameState.powerUps = delta.powerUps;
+                gameState.score = delta.score;
+                gameState.level = delta.level;
+                if (gameState.players[localPlayerId]) {
+                    gameState.players[localPlayerId].vx = localVx;
+                }
+                renderGame(gameState);
             }
         });
 
@@ -236,11 +275,11 @@
                 cancelAnimationFrame(animationFrameId);
                 animationFrameId = null;
             }
-            ctx.clearRect(0, 0, canvas.width, canvas.height);
+            ctx.clearRect(0, 0, 800, 400);
             ctx.fillStyle = "white";
             ctx.font = "48px Arial";
             ctx.textAlign = "center";
-            ctx.fillText(`Seviye: ${state.level}`, canvas.width / 2, canvas.height / 2);
+            ctx.fillText(`Seviye: ${state.level}`, 400, 200);
             setTimeout(() => {
                 gameRunning = true;
                 animationFrameId = requestAnimationFrame(gameLoop);
@@ -251,18 +290,30 @@
             leftButton.addEventListener("touchstart", (e) => {
                 e.preventDefault();
                 socket.emit("player-input", { room: ROOM_ID, action: "move-left", state: true });
+                if (gameState.players[localPlayerId]) {
+                    gameState.players[localPlayerId].vx = -3;
+                }
             });
             leftButton.addEventListener("touchend", (e) => {
                 e.preventDefault();
                 socket.emit("player-input", { room: ROOM_ID, action: "move-left", state: false });
+                if (gameState.players[localPlayerId]) {
+                    gameState.players[localPlayerId].vx = 0;
+                }
             });
             rightButton.addEventListener("touchstart", (e) => {
                 e.preventDefault();
                 socket.emit("player-input", { room: ROOM_ID, action: "move-right", state: true });
+                if (gameState.players[localPlayerId]) {
+                    gameState.players[localPlayerId].vx = 3;
+                }
             });
             rightButton.addEventListener("touchend", (e) => {
                 e.preventDefault();
                 socket.emit("player-input", { room: ROOM_ID, action: "move-right", state: false });
+                if (gameState.players[localPlayerId]) {
+                    gameState.players[localPlayerId].vx = 0;
+                }
             });
             shootButton.addEventListener("touchstart", (e) => {
                 e.preventDefault();
@@ -276,8 +327,14 @@
             const key = e.key.toLowerCase();
             if (key === "a" || key === "arrowleft") {
                 socket.emit("player-input", { room: ROOM_ID, action: "move-left", state: true });
+                if (gameState.players[localPlayerId]) {
+                    gameState.players[localPlayerId].vx = -3;
+                }
             } else if (key === "d" || key === "arrowright") {
                 socket.emit("player-input", { room: ROOM_ID, action: "move-right", state: true });
+                if (gameState.players[localPlayerId]) {
+                    gameState.players[localPlayerId].vx = 3;
+                }
             } else if ((key === "w" || key === "arrowup") && gameRunning) {
                 socket.emit("player-input", { room: ROOM_ID, action: "shoot" });
             }
@@ -287,8 +344,14 @@
             const key = e.key.toLowerCase();
             if (key === "a" || key === "arrowleft") {
                 socket.emit("player-input", { room: ROOM_ID, action: "move-left", state: false });
+                if (gameState.players[localPlayerId]) {
+                    gameState.players[localPlayerId].vx = 0;
+                }
             } else if (key === "d" || key === "arrowright") {
                 socket.emit("player-input", { room: ROOM_ID, action: "move-right", state: false });
+                if (gameState.players[localPlayerId]) {
+                    gameState.players[localPlayerId].vx = 0;
+                }
             }
         });
 
@@ -304,6 +367,7 @@
                 canvas.style.display = "block";
                 gameOverScreen.style.display = "none";
                 ctx = canvas.getContext("2d");
+                resizeCanvas();
                 gameRunning = true;
                 animationFrameId = requestAnimationFrame(gameLoop);
             } catch (e) {
@@ -319,10 +383,24 @@
             socket.emit("join-game", ROOM_ID);
         }
 
-        function gameLoop() {
+        function gameLoop(timestamp) {
             if (!gameRunning || !ctx) return;
+            if (timestamp - lastRender < 16) {
+                animationFrameId = requestAnimationFrame(gameLoop);
+                return;
+            }
+            lastRender = timestamp;
+            if (gameState.players[localPlayerId]) {
+                const player = gameState.players[localPlayerId];
+                player.x += player.vx;
+                if (player.x < 0) player.x = 0;
+                if (player.x + (player.width || 32) > 800) player.x = 800 - (player.width || 32);
+            }
+            renderGame(gameState);
             animationFrameId = requestAnimationFrame(gameLoop);
         }
+
+        window.addEventListener('resize', resizeCanvas);
 
         document.addEventListener('DOMContentLoaded', () => {
             console.log("SCRIPT: DOM fully loaded.");
@@ -331,6 +409,7 @@
             } else {
                 console.log("SCRIPT: Canvas element found.");
                 canvas.style.display = 'none';
+                resizeCanvas();
             }
         });
     </script>

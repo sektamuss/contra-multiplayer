@@ -4,7 +4,10 @@ const { Server } = require("socket.io");
 
 const app = express();
 const server = http.createServer(app);
-const io = new Server(server);
+const io = new Server(server, {
+    cors: { origin: "*" },
+    compression: true
+});
 
 app.use(express.static("public"));
 
@@ -12,7 +15,7 @@ const ROOM_ID = "game-room";
 const gravity = 0.15;
 const floor = 400;
 const initialLargeRadius = 30;
-const FPS = 60;
+const FPS = 30;
 
 let gameState = {
     players: {},
@@ -22,6 +25,8 @@ let gameState = {
     level: 1,
     gameRunning: false
 };
+
+let lastGameState = JSON.parse(JSON.stringify(gameState));
 
 class Player {
     constructor(id, x, color) {
@@ -151,7 +156,7 @@ function checkRectRectCollision(rect1, rect2) {
 
 function spawnEnemiesForLevel() {
     gameState.enemies = [];
-    const baseEnemies = 2 + Math.floor(gameState.level / 2);
+    const baseEnemies = Math.min(2 + Math.floor(gameState.level / 2), 4);
     const speedIncrease = 1.5 + gameState.level * 0.2;
     for (let i = 0; i < baseEnemies; i++) {
         const x = (800 / (baseEnemies + 1)) * (i + 1);
@@ -160,10 +165,26 @@ function spawnEnemiesForLevel() {
     }
 }
 
+function getDeltaState() {
+    const delta = {
+        players: {},
+        enemies: gameState.enemies,
+        powerUps: gameState.powerUps,
+        score: gameState.score,
+        level: gameState.level
+    };
+    for (let id in gameState.players) {
+        if (!lastGameState.players[id] || JSON.stringify(gameState.players[id]) !== JSON.stringify(lastGameState.players[id])) {
+            delta.players[id] = gameState.players[id];
+        }
+    }
+    lastGameState = JSON.parse(JSON.stringify(gameState));
+    return delta;
+}
+
 function updateGameState() {
     if (!gameState.gameRunning) return;
 
-    // Oyuncular
     for (let id in gameState.players) {
         const player = gameState.players[id];
         if (!player.isAlive) {
@@ -195,7 +216,6 @@ function updateGameState() {
         }
     }
 
-    // Güçlendirmeler
     gameState.powerUps = gameState.powerUps.filter(p => p.active);
     for (let powerUp of gameState.powerUps) {
         powerUp.update();
@@ -229,7 +249,6 @@ function updateGameState() {
         }
     }
 
-    // Düşmanlar
     let newEnemies = [];
     for (let i = gameState.enemies.length - 1; i >= 0; i--) {
         const enemy = gameState.enemies[i];
@@ -293,7 +312,6 @@ function updateGameState() {
     }
     gameState.enemies.push(...newEnemies);
 
-    // Seviye ve Oyun Sonu Kontrolü
     if (gameState.enemies.length === 0) {
         gameState.level++;
         spawnEnemiesForLevel();
@@ -323,10 +341,9 @@ io.on("connection", (socket) => {
         const x = color === "red" ? 50 : 800 - 50 - 32;
         gameState.players[socket.id] = new Player(socket.id, x, color);
         io.to(roomId).emit("player-joined", socket.id);
-        if (Object.keys(gameState.players).length === 1) {
-            gameState.gameRunning = true;
-            spawnEnemiesForLevel();
-        }
+        // Start game with one player for testing
+        gameState.gameRunning = true;
+        spawnEnemiesForLevel();
     });
 
     socket.on("player-input", (data) => {
@@ -364,7 +381,8 @@ io.on("connection", (socket) => {
 setInterval(() => {
     if (gameState.gameRunning) {
         updateGameState();
-        io.to(ROOM_ID).emit("game-state", gameState);
+        console.log("State sent:", new Date().getTime());
+        io.to(ROOM_ID).emit("game-state", getDeltaState());
     }
 }, 1000 / FPS);
 
