@@ -1,0 +1,338 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+    <title>Belalı Baloncuklar - Online Multiplayer</title>
+    <style>
+        body {
+            background-color: #111;
+            color: white;
+            font-family: sans-serif;
+            margin: 0;
+            overflow: hidden;
+            touch-action: none;
+        }
+        canvas {
+            background: #222;
+            display: block;
+            margin: 20px auto;
+            border: 1px solid #555;
+            max-width: 100%;
+            height: auto;
+        }
+        #menu {
+            text-align: center;
+            margin-top: 50px;
+        }
+        #menu button {
+            padding: 10px 15px;
+            font-size: 16px;
+            cursor: pointer;
+            margin: 5px;
+        }
+        #gameOverScreen {
+            display: none;
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            background-color: rgba(0, 0, 0, 0.8);
+            padding: 30px;
+            border-radius: 10px;
+            text-align: center;
+            font-size: 24px;
+            color: white;
+            z-index: 10;
+        }
+        #gameOverScreen button {
+            padding: 10px 15px;
+            font-size: 16px;
+            cursor: pointer;
+            margin-top: 20px;
+        }
+        #mobileControls {
+            display: none;
+            position: fixed;
+            bottom: 20px;
+            width: 100%;
+            z-index: 5;
+            pointer-events: none;
+        }
+        .controlButton {
+            pointer-events: auto;
+            position: absolute;
+            background: rgba(255, 255, 255, 0.3);
+            border: 2px solid #fff;
+            border-radius: 10px;
+            color: white;
+            font-size: 24px;
+            padding: 20px;
+            width: 80px;
+            height: 80px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            user-select: none;
+            touch-action: none;
+        }
+        #leftButton {
+            left: 20px;
+        }
+        #rightButton {
+            left: 120px;
+        }
+        #shootButton {
+            right: 20px;
+        }
+        @media (max-width: 768px) {
+            #mobileControls {
+                display: block;
+            }
+            canvas {
+                margin: 10px auto;
+                width: 100%;
+                height: auto;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div id="menu">
+        <h2>Belalı Baloncuklar Online Multiplayer</h2>
+        <p>WASD/Ok Tuşları veya Mobil Butonlar: Hareket | W/Yukarı Ok veya Ateş Butonu: Ateş</p>
+        <button onclick="startGame()">Oyunu Başlat</button>
+    </div>
+
+    <canvas id="gameCanvas" width="800" height="400" style="display: none;"></canvas>
+
+    <div id="gameOverScreen">
+        Oyun Bitti!
+        <br>
+        <span id="finalScore"></span>
+        <br>
+        <span id="finalLevel"></span>
+        <br>
+        <button onclick="restartGame()">Yeniden Başlat</button>
+    </div>
+
+    <div id="mobileControls">
+        <div id="leftButton" class="controlButton">←</div>
+        <div id="rightButton" class="controlButton">→</div>
+        <div id="shootButton" class="controlButton">↑</div>
+    </div>
+
+    <script src="https://cdn.socket.io/4.7.5/socket.io.min.js"></script>
+    <script defer>
+        console.log("SCRIPT: Loading...");
+
+        const socket = io();
+        const ROOM_ID = "game-room";
+
+        const canvas = document.getElementById("gameCanvas");
+        const menuDiv = document.getElementById("menu");
+        const gameOverScreen = document.getElementById("gameOverScreen");
+        const finalScoreDisplay = document.getElementById("finalScore");
+        const finalLevelDisplay = document.getElementById("finalLevel");
+        const leftButton = document.getElementById("leftButton");
+        const rightButton = document.getElementById("rightButton");
+        const shootButton = document.getElementById("shootButton");
+
+        let ctx = null;
+        let gameRunning = false;
+        let animationFrameId = null;
+        let keys = {};
+
+        function checkBallRectCollision(ball, rect) {
+            if (!rect || !ball) return false;
+            const cX = Math.max(rect.x, Math.min(ball.x, rect.x + rect.width));
+            const cY = Math.max(rect.y, Math.min(ball.y, rect.y + rect.height));
+            const dx = ball.x - cX;
+            const dy = ball.y - cY;
+            return (dx * dx + dy * dy) < (ball.radius * ball.radius);
+        }
+
+        function drawLives(player, startX, color) {
+            if (!player || !ctx) return;
+            ctx.fillStyle = color;
+            const hs = 15, sp = 5;
+            for (let i = 0; i < player.lives; i++) {
+                ctx.fillRect(startX + i * (hs + sp), 15, hs, hs);
+            }
+        }
+
+        function renderGame(state) {
+            if (!ctx) return;
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+            ctx.fillStyle = "white";
+            ctx.font = "18px Arial";
+            ctx.textAlign = "center";
+            ctx.fillText(`Skor: ${state.score} | Seviye: ${state.level}`, canvas.width / 2, 30);
+
+            for (let id in state.players) {
+                const player = state.players[id];
+                if (!player.isAlive) continue;
+                ctx.fillStyle = player.color;
+                ctx.fillRect(player.x, player.y, player.width, player.height);
+                if (player.harpoon && player.harpoon.active) {
+                    ctx.fillStyle = player.color;
+                    ctx.fillRect(
+                        player.harpoon.x - player.harpoon.width / 2,
+                        player.harpoon.y,
+                        player.harpoon.width,
+                        player.harpoon.startY - player.harpoon.y
+                    );
+                }
+                if (player.activePowerUp) {
+                    ctx.beginPath();
+                    ctx.arc(player.x + player.width / 2, player.y - 10, 5, 0, Math.PI * 2);
+                    ctx.fillStyle = player.activePowerUp === 'bulletSpeed' ? 'yellow' : 'purple';
+                    ctx.fill();
+                    ctx.closePath();
+                }
+                drawLives(player, player.color === "red" ? 20 : canvas.width - 20 - (player.lives * (15 + 5)) + 5, player.color);
+            }
+
+            for (let enemy of state.enemies) {
+                ctx.beginPath();
+                ctx.arc(enemy.x, enemy.y, enemy.radius, 0, Math.PI * 2);
+                ctx.fillStyle = "white";
+                ctx.fill();
+                ctx.closePath();
+            }
+
+            for (let powerUp of state.powerUps) {
+                ctx.fillStyle = powerUp.type === 'bulletSpeed' ? 'yellow' : 'purple';
+                ctx.fillRect(powerUp.x - powerUp.width / 2, powerUp.y - powerUp.height / 2, powerUp.width, powerUp.height);
+            }
+        }
+
+        socket.on("connect", () => {
+            console.log("Bağlandı:", socket.id);
+            socket.emit("join-game", ROOM_ID);
+        });
+
+        socket.on("game-state", (state) => {
+            if (gameRunning) {
+                renderGame(state);
+            }
+        });
+
+        socket.on("game-over", (state) => {
+            gameRunning = false;
+            if (animationFrameId) {
+                cancelAnimationFrame(animationFrameId);
+                animationFrameId = null;
+            }
+            if (finalScoreDisplay) finalScoreDisplay.textContent = `Skor: ${state.score}`;
+            if (finalLevelDisplay) finalLevelDisplay.textContent = `Seviye: ${state.level}`;
+            if (gameOverScreen) gameOverScreen.style.display = "block";
+        });
+
+        socket.on("next-level", (state) => {
+            gameRunning = false;
+            if (animationFrameId) {
+                cancelAnimationFrame(animationFrameId);
+                animationFrameId = null;
+            }
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+            ctx.fillStyle = "white";
+            ctx.font = "48px Arial";
+            ctx.textAlign = "center";
+            ctx.fillText(`Seviye: ${state.level}`, canvas.width / 2, canvas.height / 2);
+            setTimeout(() => {
+                gameRunning = true;
+                animationFrameId = requestAnimationFrame(gameLoop);
+            }, 2000);
+        });
+
+        function setupMobileControls() {
+            leftButton.addEventListener("touchstart", (e) => {
+                e.preventDefault();
+                socket.emit("player-input", { room: ROOM_ID, action: "move-left", state: true });
+            });
+            leftButton.addEventListener("touchend", (e) => {
+                e.preventDefault();
+                socket.emit("player-input", { room: ROOM_ID, action: "move-left", state: false });
+            });
+            rightButton.addEventListener("touchstart", (e) => {
+                e.preventDefault();
+                socket.emit("player-input", { room: ROOM_ID, action: "move-right", state: true });
+            });
+            rightButton.addEventListener("touchend", (e) => {
+                e.preventDefault();
+                socket.emit("player-input", { room: ROOM_ID, action: "move-right", state: false });
+            });
+            shootButton.addEventListener("touchstart", (e) => {
+                e.preventDefault();
+                socket.emit("player-input", { room: ROOM_ID, action: "shoot" });
+            });
+        }
+
+        setupMobileControls();
+
+        window.addEventListener("keydown", (e) => {
+            const key = e.key.toLowerCase();
+            if (key === "a" || key === "arrowleft") {
+                socket.emit("player-input", { room: ROOM_ID, action: "move-left", state: true });
+            } else if (key === "d" || key === "arrowright") {
+                socket.emit("player-input", { room: ROOM_ID, action: "move-right", state: true });
+            } else if ((key === "w" || key === "arrowup") && gameRunning) {
+                socket.emit("player-input", { room: ROOM_ID, action: "shoot" });
+            }
+        });
+
+        window.addEventListener("keyup", (e) => {
+            const key = e.key.toLowerCase();
+            if (key === "a" || key === "arrowleft") {
+                socket.emit("player-input", { room: ROOM_ID, action: "move-left", state: false });
+            } else if (key === "d" || key === "arrowright") {
+                socket.emit("player-input", { room: ROOM_ID, action: "move-right", state: false });
+            }
+        });
+
+        function startGame() {
+            console.log("START: Starting game...");
+            if (!canvas || !menuDiv || !gameOverScreen) {
+                alert("Required elements missing!");
+                console.error("START: Missing required DOM elements.");
+                return;
+            }
+            try {
+                menuDiv.style.display = "none";
+                canvas.style.display = "block";
+                gameOverScreen.style.display = "none";
+                ctx = canvas.getContext("2d");
+                gameRunning = true;
+                animationFrameId = requestAnimationFrame(gameLoop);
+            } catch (e) {
+                console.error("START: Error:", e);
+                alert("Oyun başlatılamadı.");
+            }
+        }
+
+        function restartGame() {
+            console.log("RESTART: Restarting game...");
+            if (gameOverScreen) gameOverScreen.style.display = "none";
+            startGame();
+            socket.emit("join-game", ROOM_ID);
+        }
+
+        function gameLoop() {
+            if (!gameRunning || !ctx) return;
+            animationFrameId = requestAnimationFrame(gameLoop);
+        }
+
+        document.addEventListener('DOMContentLoaded', () => {
+            console.log("SCRIPT: DOM fully loaded.");
+            if (!canvas) {
+                console.error("SCRIPT: Canvas element NOT FOUND!");
+            } else {
+                console.log("SCRIPT: Canvas element found.");
+                canvas.style.display = 'none';
+            }
+        });
+    </script>
+</body>
+</html>
